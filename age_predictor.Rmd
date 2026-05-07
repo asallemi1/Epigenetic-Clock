@@ -270,7 +270,7 @@ dim(train.beta.collapsed)
 cat("Val shape:")
 dim(val.beta.collapsed)
 ```
-nessuna riga/colonna è stata rimossa == nessuna riga/colonna aveva più del 50% dei valori come NA
+
 
 # Model training - glmnet (feature selection)
 ```{r}
