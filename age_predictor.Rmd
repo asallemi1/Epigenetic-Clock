@@ -85,7 +85,7 @@ as.data.frame(samples_annot[1:5, ])
 as.data.frame(samples.beta.collapsed[1:5, 1:5])
 ```
 
-in samples annotation mancano i nomi delle righe, che corrispondono alle colonne di samples.beta.collapsed. vengono aggiunti
+
 ```{r}
 samples_annot <- as.data.frame(samples_annot)
 col_names <- colnames(samples.beta.collapsed)
