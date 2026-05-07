@@ -113,13 +113,7 @@ ggplot(results, aes(x = delta_age)) +
        y = "Frequency") +
   theme_minimal()
 ```
-\
-Descriptive analysis of Δ-age shows:
-- The distribution of differences between epigenetic age predicted (by the glmnet model) and chronological age
-- From the summary and histogram, we can observe:
-  - The median of the differences (close to 0 indicates good overall accuracy of the model)
-  - The width of the distribution (greater variability indicates individual differences in epigenetic aging)
-  - Any skewness (skewness) that might indicate a systematic tendency to over/underestimate
+
 
 ## 2. Difference per sex
 ```{r}
@@ -145,11 +139,6 @@ if(length(unique(na.omit(results$Sex))) == 2) {
 }
 
 ```
-\
-From the boxplot and statistical test:
-- If the p-value of the t-test/Wilcoxon is <0.05, there is a significant difference in Δ-age between the sexes
-- The direction of the difference indicates which sex tends to have accelerated epigenetic aging (positive Δ-age) or slowed epigenetic aging (negative Δ-age)
-- The magnitude of the differences (from the scale of the graph) shows the magnitude of the biological effect
 
 ## 3. Difference per ethnicity
 ```{r}
@@ -171,12 +160,6 @@ if("ethnicity" %in% colnames(results)) {
 }
 
 ```
-\
-If present in the dataset:
-- Kruskal-Wallis test assesses differences between ethnic groups
-- Significant p-value (<0.05) suggests that epigenetic aging varies between ethnicities
-- Dunn's post-hoc test identifies which pairs of groups differ significantly
-- Differences could reflect genetic, environmental, or socioeconomic factors
 
 ## 4. Subgroups of Aging
 ```{r}
@@ -203,15 +186,6 @@ print(ggplot(results, aes(x = aging_group, y = age, fill = aging_group)) +
        x = "Aging group", y = "Chronological age") +
   theme_minimal())
 ```
-\
-From the group analysis (thresholds ±2 years):
-- The frequency table shows the proportion of individuals with aging:
-  - Accelerated (Δ-age > +2 years)
-  - Normal
-  - Slowed (Δ-age < -2 years)
-- The boxplot of chronological age by group shows:
-  - Whether certain age groups are more prone to extreme patterns
-  - Any nonlinear relationships between chronological age and epigenetics
   
 ## 5. Multivariate model
 ```{r}
@@ -220,12 +194,6 @@ cat("\nModello lineare per predire Δ-age:\n")
 model <- lm(delta_age ~ Sex + ethnicity, data = results)
 print(summary(model))
 ```
-\
-From linear regression:
-- The estimated coefficients show the independent effect of sex and ethnicity on Δ-age
-- The p-values indicate which factors contribute significantly to the variability
-- R² shows the fraction of variance explained by the model
-- High residuals suggest that other factors (e.g., lifestyles) may be important
 
 # Data Enrichment
 
@@ -612,8 +580,6 @@ complete_gene_data <- complete_gene_data %>%
 genes_annot = readRDS("genes_annotation.rds")
 ```
 \
-Here is a structured analysis to interpret the data and suggestions for exploration:
-
 **Explanation of Main Columns**
 | Column | Meaning | Example/Notes |
 |---------|-------------|--------------|
@@ -711,9 +677,6 @@ genes_annot %>%
   filter(is.na(gene_biotype))
 ```
 
-info from gene card:
-other name of KIAA0100 is BLTP2 is a protein coding
-LOC439933, LOC105372383, PRR34-AS1 and LINC01114 are lncRNAs
 
 ```{r}
 # Assegna il tipo di gene (gene_biotype) in base al simbolo HGNC (hgnc_symbol)
@@ -1281,20 +1244,6 @@ plot <- plot %>%
   )
 ```
 
-*Choice of metric (instead of Stouffer's):*.
-I used **`min_smoothed_fdr`** because:
-1. **Statistical robustness**: It is the most conservative FDR value among the probes in the DMR.
-2. **Clinical interpretability**: FDR is more intuitive for biomedical researchers.
-3. **Error control**: Better control of false positives than Stouffer/Fisher.
-
-*Comparison of available metrics:*
-| Metrics | Advantages | Limitations |
-|------------------|----------------------------------------|----------------------------------------|
-| `min_smoothed_fdr` | Strict FDR control | Can be too conservative |
-| `Stouffer` | Combine p-values | Sensitive to correlations between probes |
-| `Fisher` | Sensitive to small deviations | Too many false positives |
-| `maxdiff` | Highlights large effects | Ignores consistency in probes |
-| `meandiff` | Good balance | Loses localized signals |
 
 
 ```{r}
