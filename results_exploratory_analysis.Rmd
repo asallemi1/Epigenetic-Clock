@@ -261,10 +261,6 @@ print(matched_probe)
 # struttura di aggregated_annotation
 str(aggregated_annotation)
 ```
-\
-The probes selected by the model were annotated using the IlluminaHumanMethylationEPICv2package, which provides for each probe:
-- chromosome and genomic position 
-- genes located in the probes targeted region
 
 ```{r}
 # identificare i cromosomi più frequenti 
