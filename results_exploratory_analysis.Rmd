@@ -1,0 +1,1317 @@
+---
+title: "biosciences_further_investig"
+author: "Alisia Sallemi"
+date: "2025-04-24"
+output: html_document
+---
+
+### Libraries
+```{r}
+set.seed(123)
+library(sesame) 
+library(DMRcate)
+library(GenomicRanges)
+library(limma)
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+library(minfi)
+library(meffonym)
+library(biomaRt)
+library(stringi)
+
+library(caret)
+library(impute)
+
+library(glmnet)
+library(FSA)
+
+library(ggplot2)
+library(lattice)
+library(ggrepel)
+library(VennDiagram)
+library(scales)
+library(igraph)
+library(ggraph)
+library(UpSetR)
+library(wordcloud)
+library(tidygraph)
+
+library(tidyverse)
+library(tidytext)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(enrichplot)
+library(STRINGdb)
+library(ggpubr)
+library(umap)
+library(SnowballC)
+library(stringr)
+
+
+library(dplyr)
+library(plotly)
+library(tidyr)
+```
+
+
+# Load Data
+```{r}
+# # data
+ idat_dir <- "/home/alisias/data/GSE246337/"
+ setwd(idat_dir)
+# 
+# # metadata
+samples_annot = readRDS("GSE246337_annotation.Rds")
+```
+
+```{r}
+# Estrai la mappa delle sonde
+annotation <- getAnnotation(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+
+# Visualizza le prime righe dell'annotazione
+head(annotation, 3)
+```
+
+```{r}
+# results
+results = readRDS("results.rds")
+probes = readRDS("selected_probes.rds")
+```
+
+```{r}
+# dropping useless columns 
+cols_to_drop <- c("race2", "subject id", "geo", "tissue", "HRV", "SKIN")
+results <- results[, !(names(results) %in% cols_to_drop)]
+```
+
+
+# Covariates impact on predictions
+
+## 1. Difference between Epigenetic and Chronological Age (Δ-age)
+```{r}
+# Calcolo del Δ-age (differenza tra età epigenetica e cronologica)
+delta_age <- results$glmnet_calibrated - results$age
+
+# Aggiungi il Δ-age al dataframe dei metadati
+results$delta_age <- delta_age
+
+# Analisi descrittiva del Δ-age
+cat("Analisi descrittiva del Δ-age:\n")
+summary(delta_age)
+
+```
+
+
+
+```{r}
+# Visualizzazione distribuzione del Δ-age
+ggplot(results, aes(x = delta_age)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Δ-age Distribution", 
+       x = "Δ-age (epigenetic age - chronological age)", 
+       y = "Frequency") +
+  theme_minimal()
+```
+\
+Descriptive analysis of Δ-age shows:
+- The distribution of differences between epigenetic age predicted (by the glmnet model) and chronological age
+- From the summary and histogram, we can observe:
+  - The median of the differences (close to 0 indicates good overall accuracy of the model)
+  - The width of the distribution (greater variability indicates individual differences in epigenetic aging)
+  - Any skewness (skewness) that might indicate a systematic tendency to over/underestimate
+
+## 2. Difference per sex
+```{r}
+# 2. Analisi delle correlazioni con variabili demografiche
+# Test per differenze di Δ-age tra gruppi
+cat("\nAnalisi differenze Δ-age per sesso:\n")
+# Boxplot
+ggplot(results, aes(x = Sex, y = delta_age, fill = Sex)) +
+  geom_boxplot() +
+  labs(title = "Δ-age per Sex", x = "Sex", y = "Δ-age") +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+# Test statistico (t-test o Wilcoxon a seconda della distribuzione)
+if(length(unique(na.omit(results$Sex))) == 2) {
+  print(t.test(delta_age ~ Sex, data = results))
+} else {
+  print(kruskal.test(delta_age ~ Sex, data = results))
+}
+
+```
+\
+From the boxplot and statistical test:
+- If the p-value of the t-test/Wilcoxon is <0.05, there is a significant difference in Δ-age between the sexes
+- The direction of the difference indicates which sex tends to have accelerated epigenetic aging (positive Δ-age) or slowed epigenetic aging (negative Δ-age)
+- The magnitude of the differences (from the scale of the graph) shows the magnitude of the biological effect
+
+## 3. Difference per ethnicity
+```{r}
+# Analisi per razza/etnia (se presente)
+if("ethnicity" %in% colnames(results)) {
+  cat("\nAnalisi differenze Δ-age per etnia:\n")
+  print(ggplot(results, aes(x = ethnicity, y = delta_age, fill = ethnicity)) +
+          geom_boxplot() +
+          labs(title = "Δ-age per Ethnicity", x = "Ethnicity", y = "Δ-age") +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(kruskal.test(delta_age ~ ethnicity, data = results))
+  
+  # Post-hoc test se significativo
+  if(kruskal.test(delta_age ~ ethnicity, data = results)$p.value < 0.05) {
+    print(dunnTest(delta_age ~ ethnicity, data = results))
+  }
+}
+
+```
+\
+If present in the dataset:
+- Kruskal-Wallis test assesses differences between ethnic groups
+- Significant p-value (<0.05) suggests that epigenetic aging varies between ethnicities
+- Dunn's post-hoc test identifies which pairs of groups differ significantly
+- Differences could reflect genetic, environmental, or socioeconomic factors
+
+## 4. Subgroups of Aging
+```{r}
+# 4. Identificazione di sottogruppi con invecchiamento accelerato/rallentato
+# Definizione di soglie (valori arbitrari, possono essere modificati)
+accelerated <- delta_age > 2  # +2 anni come soglia per invecchiamento accelerato
+decelerated <- delta_age < -2  # -2 anni come soglia per invecchiamento rallentato
+
+results$aging_group <- "Normal"
+results$aging_group[accelerated] <- "Accelerated"
+results$aging_group[decelerated] <- "Decelerated"
+
+# Tabella frequenze
+cat("\nDistribuzione gruppi di invecchiamento:\n")
+print(table(results$aging_group))
+```
+
+
+```{r}
+# Visualizzazione
+print(ggplot(results, aes(x = aging_group, y = age, fill = aging_group)) +
+  geom_boxplot() +
+  labs(title = "Chronological age by aging group",
+       x = "Aging group", y = "Chronological age") +
+  theme_minimal())
+```
+\
+From the group analysis (thresholds ±2 years):
+- The frequency table shows the proportion of individuals with aging:
+  - Accelerated (Δ-age > +2 years)
+  - Normal
+  - Slowed (Δ-age < -2 years)
+- The boxplot of chronological age by group shows:
+  - Whether certain age groups are more prone to extreme patterns
+  - Any nonlinear relationships between chronological age and epigenetics
+  
+## 5. Multivariate model
+```{r}
+# 5. Analisi multivariata (esempio con regressione lineare)
+cat("\nModello lineare per predire Δ-age:\n")
+model <- lm(delta_age ~ Sex + ethnicity, data = results)
+print(summary(model))
+```
+\
+From linear regression:
+- The estimated coefficients show the independent effect of sex and ethnicity on Δ-age
+- The p-values indicate which factors contribute significantly to the variability
+- R² shows the fraction of variance explained by the model
+- High residuals suggest that other factors (e.g., lifestyles) may be important
+
+# Data Enrichment
+
+## 1. Probes annotation with illumina package
+```{r}
+# Funzione per mappare probes collassate ai nomi estesi
+match_collapsed_probes <- function(probes, annotation) {
+  # Estrai gli ID base (prima del primo "_") dai rownames dell'annotation
+  annotation_base_ids <- sub("_.*", "", rownames(annotation))
+  
+  # Crea una mappa: ID base -> righe di annotation
+  annotation$base_id <- annotation_base_ids
+  
+  # Trova quali probes matchano
+  matched_annotation <- annotation[annotation$base_id %in% probes, ]
+  
+  # Rimuovi la colonna di lavoro temporanea
+  matched_annotation$base_id <- NULL
+  
+  return(matched_annotation)
+}
+```
+
+```{r}
+# Estrazione delle informazioni sulle probes selezionate con glmnet
+selected_annotation <- match_collapsed_probes(probes, annotation)
+```
+
+```{r}
+dim(selected_annotation)
+```
+
+```{r}
+# Aggrega le annotazioni duplicate
+aggregated_annotation <- aggregate_to_probes(selected_annotation)
+
+dim(aggregated_annotation)
+```
+
+```{r}
+probes
+```
+
+```{r}
+# questa probe non viene annotata poichè manca in IlluminaHumanMethylationEPICv2anno.20a1.hg38
+length(intersect(probes, rownames(aggregated_annotation)))
+setdiff(probes, rownames(aggregated_annotation))
+```
+
+```{r}
+# indagine sulla missing porbe "cg09814200"
+
+probe_to_find <- "cg09814200"
+
+annotation_base_ids <- sub("_.*", "", rownames(annotation))
+temp_annot <- as.data.frame(annotation)
+temp_annot$base_id <- annotation_base_ids
+matched_probe <- temp_annot[temp_annot$base_id == probe_to_find, ]
+
+print(matched_probe)
+```
+
+
+```{r}
+# struttura di aggregated_annotation
+str(aggregated_annotation)
+```
+\
+The probes selected by the model were annotated using the IlluminaHumanMethylationEPICv2package, which provides for each probe:
+- chromosome and genomic position 
+- genes located in the probes targeted region
+
+```{r}
+# identificare i cromosomi più frequenti 
+# Estrae la colonna 'chr' e calcola le frequenze
+chromosome_counts <- table(aggregated_annotation$chr)
+
+# Ordina i cromosomi in ordine decrescente di frequenza
+sorted_chromosomes <- sort(chromosome_counts, decreasing = TRUE)
+
+# Stampa i risultati
+cat("Cromosomi più frequenti:\n")
+print(sorted_chromosomes)
+```
+
+
+```{r}
+# identificare le isole di metilazione
+# Estrae le isole non vuote
+islands <- aggregated_annotation$Islands_Name[aggregated_annotation$Islands_Name != ""]
+
+# Calcola il numero di probe per isola
+island_counts <- table(islands)
+
+# Ordina le isole per numero di probe
+sorted_islands <- sort(island_counts, decreasing = TRUE)
+
+# Stampa i risultati
+cat("\nIsole di metilazione e conteggio probe:\n")
+print(sorted_islands)
+```
+
+
+```{r}
+# Statistiche aggiuntive
+cat("\nStatistiche riassuntive:")
+cat("\n- Totale probe analizzati:", aggregated_annotation@nrows)
+cat("\n- Probe in isole di metilazione:", sum(island_counts))
+cat("\n- Probe non associati a isole:", sum(aggregated_annotation$Islands_Name == ""))
+```
+
+### 1.a Horvath and Skin&Blood probes enrichment 
+```{r}
+# identificare quante probe sono presenti in altri clock epigenetici
+horvath_probes = meffonym.get.model("horvath")$vars
+skin_probes = meffonym.get.model("skin")$vars
+
+horvath_common = intersect(horvath_probes, probes)
+skin_common = intersect(skin_probes, probes)
+
+cat("Common probes with the Horvath model: \n")
+horvath_common
+cat("Common probes with the Skin and Blood model: \n")
+skin_common
+
+```
+
+
+```{r}
+# Estrazione delle informazioni sulle probes selezionate con horvath
+Horvath_annotation <- match_collapsed_probes(horvath_probes, annotation)
+
+# Estrazione delle informazioni sulle probes selezionate con skin
+skin_annotation <- match_collapsed_probes(skin_probes, annotation)
+```
+
+```{r}
+# Aggrega le annotazioni duplicate
+Horvath_annotation <- aggregate_to_probes(Horvath_annotation)
+skin_annotation <- aggregate_to_probes(skin_annotation)
+```
+
+
+```{r}
+# Estrazione dei nomi dei geni associati
+horvath_genes <- unique(unlist(strsplit(Horvath_annotation$UCSC_RefGene_Name, ";")))
+skin_genes <- unique(unlist(strsplit(skin_annotation$UCSC_RefGene_Name, ";")))
+
+# Rimozione di eventuali valori NA o vuoti
+horvath_genes <- horvath_genes[!is.na(horvath_genes) & horvath_genes != ""]
+skin_genes <- skin_genes[!is.na(skin_genes) & skin_genes != ""]
+```
+
+
+
+### 1.b Genes identified by the Age Model selected probes
+```{r}
+# Estrazione dei nomi dei geni associati
+gene_names <- unique(unlist(strsplit(aggregated_annotation$UCSC_RefGene_Name, ";")))
+
+# Rimozione di eventuali valori NA o vuoti
+gene_names <- gene_names[!is.na(gene_names) & gene_names != ""]
+```
+
+
+```{r}
+length(gene_names)
+```
+
+```{r}
+gene_names
+```
+
+
+## 2. Genes and pathways enrichment
+```{r}
+# Connessione al database Ensembl
+ensembl <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Recupero delle informazioni estese sui geni e proteine
+gene_protein_info <- getBM(
+  attributes = c(
+    "hgnc_symbol",                # Simbolo del gene HGNC
+    "ensembl_gene_id",            # ID Ensembl del gene
+    "ensembl_peptide_id",         # ID Ensembl della proteina
+    "uniprotswissprot",           # Accession UniProt
+    "description",                # Descrizione del gene
+    "gene_biotype",               # Tipo di gene (protein_coding, etc.)
+    "transcript_count",           # Numero di trascritti
+    "entrezgene_id",              # ID Entrez Gene
+    "go_id",                      # GO terms (processo biologico)
+    "name_1006"                   # Nome del processo biologico GO
+  ),
+  filters = "hgnc_symbol",
+  values = gene_names,
+  mart = ensembl
+)
+```
+
+
+```{r}
+# Recupero informazioni sui pathways
+pathway_info <- getBM(
+  attributes = c(
+    "hgnc_symbol",
+    "ensembl_gene_id",
+    "reactome"                   # Pathway Reactome
+  ),
+  filters = "hgnc_symbol",
+  values = gene_names,
+  mart = ensembl
+)
+
+# Unione delle informazioni
+complete_gene_info <- merge(gene_protein_info, pathway_info, 
+                           by = c("hgnc_symbol", "ensembl_gene_id"), 
+                           all = TRUE)
+```
+
+
+```{r}
+# Aggiunta di informazioni sui domini proteici
+protein_domains <- getBM(
+  attributes = c(
+    "ensembl_peptide_id",
+    "pfam",                      # Domini PFAM 
+    "interpro",                  # Domini InterPro 
+    "interpro_description"       # Descrizione dominio InterPro
+    # Nota: Alcune descrizioni PFAM potrebbero non essere disponibili direttamente
+  ),
+  filters = "ensembl_peptide_id",
+  values = gene_protein_info$ensembl_peptide_id[!is.na(gene_protein_info$ensembl_peptide_id)],
+  mart = ensembl
+)
+
+# Unione finale con i domini proteici
+final_gene_data <- merge(complete_gene_info, protein_domains, 
+                        by = "ensembl_peptide_id", 
+                        all.x = TRUE)
+
+```
+
+
+
+```{r}
+# Riordino le colonne per una migliore leggibilità
+final_gene_data <- final_gene_data %>%
+  dplyr::select(
+    hgnc_symbol,
+    ensembl_gene_id,
+    description,
+    gene_biotype,
+    transcript_count,
+    entrezgene_id,
+    ensembl_peptide_id,
+    uniprotswissprot,
+    pfam,
+    interpro,
+    interpro_description,
+    reactome,
+    go_id,
+    name_1006,
+    everything()
+  )
+```
+
+### 2.a Verifying and analysing the dataset structure
+```{r}
+# some missing genes
+## these are mostly non-coding genes (do not code proteins)
+setdiff(gene_names, final_gene_data$hgnc_symbol)
+```
+
+
+```{r}
+# Include non-protein coding biotypes
+gene_info_nc <- getBM(
+  attributes = c("hgnc_symbol", "ensembl_gene_id", "gene_biotype", "description", "transcript_count",
+    "entrezgene_id",
+    "go_id",
+    "name_1006"),
+  filters = "hgnc_symbol",
+  values = setdiff(gene_names, final_gene_data$hgnc_symbol),
+  mart = ensembl
+)
+gene_info_nc
+```
+
+
+```{r}
+# Add empty columns to gene_info_nc to match final_gene_data structure
+gene_info_nc$ensembl_peptide_id <- NA
+gene_info_nc$uniprotswissprot <- NA
+gene_info_nc$pfam <- NA
+gene_info_nc$interpro <- NA
+gene_info_nc$interpro_description <- NA
+gene_info_nc$reactome <- NA
+
+# Reorder columns to match final_gene_data
+gene_info_nc <- gene_info_nc %>%
+  select(
+    hgnc_symbol,
+    ensembl_gene_id,
+    description,
+    gene_biotype,
+    transcript_count,
+    entrezgene_id,
+    ensembl_peptide_id,
+    uniprotswissprot,
+    pfam,
+    interpro,
+    interpro_description,
+    reactome,
+    go_id,
+    name_1006
+  )
+```
+
+
+```{r}
+# Combine both datasets
+complete_gene_data <- bind_rows(final_gene_data, gene_info_nc)
+
+# Verify we now have all genes
+setdiff(gene_names, complete_gene_data$hgnc_symbol)
+```
+\
+these genes were not found because:
+- Uncharacterized loci:
+  - LOC439933
+  - LOC105372383
+- Long intergenic non-coding RNAs:
+  - LINC01114
+  - PRR34-AS1 (antisense RNA)
+- Deprecated or alternative names:
+  - KIAA0100 (may have a newer official name)
+
+proceeding with addition of NA (in each value) for these genes:
+\
+```{r}
+# Create a dataframe for completely missing genes
+missing_genes <- setdiff(gene_names, complete_gene_data$hgnc_symbol)
+
+if(length(missing_genes) > 0) {
+  missing_df <- data.frame(
+    hgnc_symbol = missing_genes,
+    ensembl_gene_id = NA,
+    description = "Gene not found in Ensembl",
+    gene_biotype = NA,
+    transcript_count = NA,
+    entrezgene_id = NA,
+    ensembl_peptide_id = NA,
+    uniprotswissprot = NA,
+    pfam = NA,
+    interpro = NA,
+    interpro_description = NA,
+    reactome = NA,
+    go_id = NA,
+    name_1006 = NA
+  )
+  
+  # Add to complete dataset
+  complete_gene_data <- bind_rows(complete_gene_data, missing_df)
+}
+```
+
+
+```{r}
+# Check all genes are now represented
+all(gene_names %in% complete_gene_data$hgnc_symbol)
+
+# View the structure of the complete data
+str(complete_gene_data)
+
+# You may want to arrange by the original gene order
+complete_gene_data <- complete_gene_data %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = gene_names)) %>%
+  arrange(hgnc_symbol)
+```
+
+```{r}
+#saveRDS(complete_gene_data, "genes_annotation.rds")
+#write.csv(complete_gene_data, "genes.csv")
+genes_annot = readRDS("genes_annotation.rds")
+```
+\
+Here is a structured analysis to interpret the data and suggestions for exploration:
+
+**Explanation of Main Columns**
+| Column | Meaning | Example/Notes |
+|---------|-------------|--------------|
+| `hgnc_symbol` | Official gene symbol (e.g., BRCA1, TP53) | Standardized by HGNC |
+| `ensembl_gene_id` | Unique ID of the gene in Ensembl (e.g., ENSG00000139618) | Structure: ENSG... |
+| `description` | Functional description of the gene | “Tumor protein p53” |
+| `gene_biotype` | Biological type (e.g., protein_coding, lncRNA) | Filter by protein |
+| `transcript_count` | Number of alternative transcripts | Higher = more isoforms |
+| `entrezgene_id` | Gene ID in Entrez database (e.g., 7157) | Link to NCBI |
+| `ensembl_peptide_id` | ID of protein isoforms (e.g., ENSP00000352607) | One per isoform |
+| `uniprotswissprot` | UniProt accession number (e.g., P04637) | Canonical format |
+| `pfam` / `interpro` | Identified protein domains | Separated by “;” |
+| `reactome` | Pathways of associated Reactome | Ex. “Cell Cycle” |
+| `go_id` / `name_1006` | GO terms and biological processes | Gene Ontology |
+
+---
+
+# Biological analysis
+
+## 1. Age Predictive Genes 
+```{r}
+# Prepara i dati
+gene_counts <- genes_annot %>%
+  filter(!is.na(hgnc_symbol)) %>%
+  pull(hgnc_symbol) %>%
+  table() %>%
+  as.data.frame() %>%
+  arrange(desc(Freq)) %>%
+  head(20)
+
+colnames(gene_counts) <- c("hgnc_symbol", "n")
+
+# Crea il grafico nello stile uniforme
+ggplot(gene_counts, aes(x = n, y = reorder(hgnc_symbol, n))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = n), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Genes Associated with Probes",
+    x = "",
+    y = "",
+    caption = "Number of probes associated with each gene"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm"),
+    plot.caption = element_text(hjust = 0.5, size = 9, margin = margin(t = 10))
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+### 1.a Word Cloud
+```{r}
+word_freq <- as.data.frame(table(hgnc_symbol = genes_annot$hgnc_symbol)) %>%
+  arrange(desc(Freq)) %>%
+  filter(!is.na(hgnc_symbol)) %>%
+  rename(n = Freq)
+
+wordcloud(words = word_freq$hgnc_symbol, freq = word_freq$n, min.freq = 1,
+          colors = brewer.pal(8, "Dark2"), random.order = FALSE)
+```
+
+
+## 2. Gene Biotype 
+```{r}
+# Preparazione dati
+gene_stats <- genes_annot %>%
+  distinct(genes_annot$hgnc_symbol, .keep_all = TRUE) %>%
+  count(gene_biotype, name = "count") %>%
+  mutate(percentage = count/sum(count)*100,
+         biotype = ifelse(percentage < 0.1, "Altri", gene_biotype)) %>%
+  group_by(biotype) %>%
+  summarise(count = sum(count)) %>%
+  arrange(desc(count)) 
+
+# Grafico
+ggplot(gene_stats, aes(x = reorder(biotype, count), y = count)) +
+  geom_col(fill = "skyblue") +
+  geom_text(aes(label = comma(count)), hjust = -0.1, size = 3.5) +
+  scale_y_log10(labels = comma, 
+                breaks = 10^(0:6),
+                expand = expansion(mult = c(0, 0.2))) +
+  coord_flip() +
+  labs(title = "Gene biotype distribution",
+       x = "",
+       y = "Number of genes (log10)") +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+```{r}
+genes_annot %>%
+  filter(is.na(gene_biotype))
+```
+
+info from gene card:
+other name of KIAA0100 is BLTP2 is a protein coding
+LOC439933, LOC105372383, PRR34-AS1 and LINC01114 are lncRNAs
+
+```{r}
+# Assegna il tipo di gene (gene_biotype) in base al simbolo HGNC (hgnc_symbol)
+genes_annot$gene_biotype[genes_annot$hgnc_symbol == "KIAA0100"] <- "protein_coding"
+genes_annot$gene_biotype[genes_annot$hgnc_symbol %in% c("LOC439933", "LOC105372383", "PRR34-AS1", "LINC01114")] <- "lncRNA"
+```
+
+
+```{r}
+# Filtra i dati escludendo protein_coding
+gene_stats <- genes_annot %>%
+  distinct(genes_annot$hgnc_symbol, .keep_all = TRUE) %>%
+  filter(gene_biotype != "protein_coding") %>%
+  count(gene_biotype, name = "count") %>%
+  mutate(percentage = count/sum(count)*100) %>%
+  arrange(desc(count))
+
+# Grafico
+ggplot(gene_stats, aes(x = reorder(gene_biotype, count), y = count)) +
+  geom_col(fill = "skyblue", width = 0.7) +
+  geom_text(aes(label = paste0(count, " (", round(percentage, 1), "%)")), 
+            hjust = -0.1, size = 3.5, color = "black") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.20))) +
+  labs(title = "Distribution of non-protein-coding gene biotypes",
+       x = "",
+       y = "Number of genes") +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank(),
+        plot.title = element_text(size = 14))
+```
+
+
+## 3. Gene Ontology
+
+### 3.a Gene Ontology by genes
+```{r}
+# Prepara i dati calcolando la frequenza per gene unico
+go_genes <- strsplit(genes_annot$name_1006, ";")
+
+# Crea una lista di tutti i GO terms con i geni corrispondenti
+go_list <- list()
+for (i in seq_along(go_genes)) {
+  if (!is.na(genes_annot$name_1006[i]) && genes_annot$name_1006[i] != "") {
+    for (go in go_genes[[i]]) {
+      if (go != "") {
+        if (is.null(go_list[[go]])) {
+          go_list[[go]] <- c()
+        }
+        go_list[[go]] <- c(go_list[[go]], genes_annot$hgnc_symbol[i])
+      }
+    }
+  }
+}
+
+# Calcola il numero di geni unici per ogni GO term
+go_counts <- data.frame(
+  go_clean = names(go_list),
+  unique_genes = sapply(go_list, function(x) length(unique(x)))
+) %>%
+  arrange(desc(unique_genes)) %>%
+  head(20)
+
+# Crea il grafico con la frequenza normalizzata
+ggplot(go_counts, aes(x = unique_genes, y = reorder(go_clean, unique_genes))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = unique_genes), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Gene Ontology Terms",
+    x = "Number of Genes",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(size = 14),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+### 3.b Gene Ontology by proteins
+```{r}
+# Prepara i dati
+go_split <- unlist(strsplit(genes_annot$name_1006, ";"))
+go_clean <- go_split[!is.na(go_split) & go_split != ""] 
+
+go_counts <- as.data.frame(table(go_clean)) %>%
+  arrange(desc(Freq)) %>%
+  head(20)  
+
+# Crea il grafico
+ggplot(go_counts, aes(x = Freq, y = reorder(go_clean, Freq))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = Freq), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Gene Ontology Terms",
+    x = "",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(size = 14),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+## 4. Protein Functions
+
+### 4.a Protein Functions by genes
+```{r}
+# Prepara i dati calcolando la frequenza per gene unico
+interpro_genes <- strsplit(genes_annot$interpro_description, ",")
+
+# Crea una lista di tutti i GO terms con i geni corrispondenti
+interpro_list <- list()
+for (i in seq_along(interpro_genes)) {
+  if (!is.na(genes_annot$interpro_description[i]) && genes_annot$interpro_description[i] != "") {
+    for (go in interpro_genes[[i]]) {
+      if (go != "") {
+        if (is.null(interpro_list[[go]])) {
+          interpro_list[[go]] <- c()
+        }
+        interpro_list[[go]] <- c(interpro_list[[go]], genes_annot$hgnc_symbol[i])
+      }
+    }
+  }
+}
+
+# Calcola il numero di geni unici per ogni GO term
+interpro_counts <- data.frame(
+  interpro_clean = names(interpro_list),
+  unique_genes = sapply(interpro_list, function(x) length(unique(x)))
+) %>%
+  arrange(desc(unique_genes)) %>%
+  head(20)
+
+# Crea il grafico con la frequenza normalizzata
+ggplot(interpro_counts, aes(x = unique_genes, y = reorder(interpro_clean, unique_genes))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = unique_genes), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Protein Functions",
+    x = "Number of Genes",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(size = 14),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+### 4.b Protein Functions by proteins
+```{r}
+# Prepara i dati
+interpro_split <- unlist(strsplit(genes_annot$interpro_description, ","))
+interpro_clean <- interpro_split[!is.na(interpro_split) & interpro_split != ""] 
+
+interpro_counts <- as.data.frame(table(interpro_clean)) %>%
+  arrange(desc(Freq)) %>%
+  head(20)  
+
+# Crea il grafico
+ggplot(interpro_counts, aes(x = Freq, y = reorder(interpro_clean, Freq))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = Freq), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Protein Functions",
+    x = "Number of Encoded Proteins",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(size = 14, hjust = 0),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 0.1, 1, 0.1, "cm")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.5)))
+```
+
+## 5. Gene Pathway Network
+
+### 5.a Most frequent pathways
+```{r}
+# Prepara i dati
+reactome_split <- unlist(strsplit(genes_annot$reactome, ";"))
+reactome_clean <- reactome_split[!is.na(reactome_split) & reactome_split != ""] 
+
+reactome_counts <- as.data.frame(table(reactome_clean)) %>%
+  arrange(desc(Freq)) %>%
+  head(20)  
+
+# Crea il grafico
+ggplot(reactome_counts, aes(x = Freq, y = reorder(reactome_clean, Freq))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = Freq), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Reactome Pathways",
+    x = "",
+    y = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(size = 14),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+### 5.b Network plot
+```{r}
+# Preparazione dati
+network_data <- genes_annot %>%
+  tidyr::separate_rows(reactome, sep = ";") %>%
+  filter(reactome != "") %>%
+  distinct(hgnc_symbol, reactome) %>%
+  rename(from = hgnc_symbol, to = reactome)
+
+# Creazione grafo con semplificazione
+g <- graph_from_data_frame(network_data, directed = FALSE) %>%
+  igraph::simplify()  # Specifica il namespace di igraph
+
+# Calcolo delle metriche per i nodi
+V(g)$degree <- degree(g)
+V(g)$betweenness <- betweenness(g)
+V(g)$type <- ifelse(V(g)$name %in% unique(network_data$from), "Gene", "Pathway")
+
+# Plot avanzato
+set.seed(123)  # Per riproducibilità
+ggraph(g, layout = "fr") +  # 'fr' = Fruchterman-Reingold layout
+  # Edge settings con curvatura variabile
+  geom_edge_link(
+    aes(edge_width = ..index..),  # Spessore basato sul numero di connessioni
+    alpha = 0.15,
+    color = "gray50",
+    show.legend = FALSE
+  ) +
+  scale_edge_width(range = c(0.3, 1.5)) +
+  
+  # Node settings con forma diversa per geni e pathway
+  geom_node_point(
+    aes(size = degree,
+        color = type,
+        shape = type,
+        alpha = betweenness),  # Trasparenza basata sulla betweenness centrality
+    stroke = 0.5
+  ) +
+  scale_color_manual(
+    name = "Node Type",
+    values = c("Gene" = "#E41A1C", "Pathway" = "#377EB8"),  # ColorBrewer
+    labels = c("Gene", "Pathway")
+  ) +
+  scale_shape_manual(
+    name = "Node Type",
+    values = c("Gene" = 19, "Pathway" = 15),  # Cerchio per geni, quadrato per pathway
+    labels = c("Gene", "Pathway")
+  ) +
+  scale_size_continuous(
+    name = "Degree",
+    range = c(2, 10),
+    breaks = pretty(degree(g), n = 3)
+  ) +
+  scale_alpha_continuous(range = c(0.6, 1)) +
+  
+  # Etichette intelligenti
+  geom_node_label(
+    aes(
+      label = ifelse(degree > quantile(degree, 0.85), name, ""),
+      color = type
+    ),
+    size = 3,
+    repel = TRUE,
+    max.overlaps = 30,
+    box.padding = 0.8,
+    point.padding = 0.3,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    show.legend = FALSE
+  ) +
+  
+  # Tema e layout
+  theme_void() +
+  labs(
+    title = "Gene-Pathway Interaction Network",
+    subtitle = "Node size represents connection degree; Transparency reflects centrality",
+    caption = "Red circles: Genes | Blue squares: Pathways"
+  ) +
+  theme(
+    legend.position = "right",
+    legend.box = "vertical",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    plot.caption = element_text(hjust = 0.5, size = 9),
+    plot.margin = margin(1, 1, 1, 1, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 10, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, shape = c(19, 15))),
+    shape = "none",  # Unificato nella legenda del colore
+    size = guide_legend(order = 1),
+    alpha = "none"  # Non mostrare la legenda per alpha
+  )
+```
+
+
+## 6. Gene Pathway UpSet plot
+```{r}
+# Preparazione dati (esempio per top 10 pathway)
+upset_data <- genes_annot %>%
+  separate_rows(reactome, sep = ";") %>%
+  filter(reactome != "") %>%
+  distinct(hgnc_symbol, reactome) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = reactome, values_from = value, values_fill = 0) %>%
+  as.data.frame()
+
+# Top 20 pathway più frequenti
+top_pathways <- names(sort(colSums(upset_data[-1]), decreasing = TRUE)[1:10])
+
+upset(
+  upset_data,
+  nsets = 10,
+  sets = top_pathways,
+  mb.ratio = c(0.6, 0.4),
+  order.by = "freq"
+)
+```
+
+
+
+## 7. Hub Genes
+```{r}
+# Calcolo metriche di centralità
+hub_genes <- genes_annot %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    num_domains = n_distinct(unlist(strsplit(pfam, ";"))),
+    num_pathways = n_distinct(unlist(strsplit(reactome, ";"))),
+    centrality_score = num_domains * log(num_pathways + 1)
+  ) %>%
+  arrange(desc(centrality_score)) %>%
+  head(20)
+
+# Visualizzazione 
+ggplot(hub_genes, aes(x = centrality_score, y = reorder(hgnc_symbol, centrality_score))) +
+  geom_col(fill = "skyblue", width = 0.8) +
+  geom_text(aes(label = round(centrality_score, 1)), hjust = -0.2, size = 3.5, color = "black") +
+  labs(
+    title = "Top 20 Hub Genes",
+    x = "",
+    y = "",
+    caption = "Hub Score = Domains × log(Pathways + 1)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10, margin = margin(r = 15)),
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(1, 1, 1, 3, "cm"),
+    plot.caption = element_text(hjust = 0.5, size = 9, margin = margin(t = 10))
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.25)))
+```
+
+
+## 8. Overlay Age Predictive Genes
+```{r}
+# Crea la lista dei set
+gene_sets <- list(
+  `Age_Model` = gene_names,
+  `Horvath` = horvath_genes,
+  `Skin&Blood` = skin_genes
+)
+
+# Crea diagramma di Venn
+venn.plot <- venn.diagram(
+  x = gene_sets,
+  filename = NULL,
+  fill = c("skyblue", "salmon", "lightgreen"),
+  alpha = 0.5,
+  label.col = "darkred",
+  cex = 1.2,
+  cat.cex = 1.2,
+  cat.col = "black",
+  main = "Overlap between groups of genes",
+  main.cex = 1.5,
+  # Aumenta la distanza tra i cerchi
+  rotation.degree = 0,  # Rimuove la rotazione per maggiore simmetria
+  margin = 0.15,        # Aumenta lo spazio attorno al diagramma
+  # Modifiche per distanziare le etichette
+  cat.dist = c(0.08, 0.08, 0.08),  # Distanza etichette dei set dai cerchi
+  cat.pos = c(-30, 30, 180),       # Posizione delle etichette
+  ext.dist = -0.3,                 # Distanza etichette numeriche dai cerchi (valori negativi allontanano)
+  ext.pos = 0                      # Rotazione etichette numeriche
+)
+
+# Visualizza il grafico
+grid.newpage()
+grid.draw(venn.plot)
+```
+
+
+
+```{r}
+# Trova l'intersezione tra i tre insiemi
+common_genes <- Reduce(intersect, list(gene_names, horvath_genes, skin_genes))
+
+# Visualizza i geni comuni
+print("Geni in comune tra i tre insiemi:")
+print(common_genes)
+```
+
+
+```{r}
+# visualizzazione della funzione dei 3 geni comuni agli epigenetic clocks
+genes_annot[genes_annot$hgnc_symbol=="KLF14" ,]
+genes_annot[genes_annot$hgnc_symbol=="PRR34-AS1" ,]
+genes_annot[genes_annot$hgnc_symbol=="SCGN" ,]
+```
+
+
+## 9. Age Associated Methylation Changes
+```{r}
+# data
+GSE246337_annot = readRDS("GSE246337_annotation.Rds")
+GSE246337_beta = readRDS("GSE246337_beta_values.Rds")
+```
+
+```{r}
+dim(GSE246337_annot)
+dim(GSE246337_beta)
+```
+
+
+```{r}
+# gathering the beta values not collapsed to be transformed into M values
+mval = BetaValueToMValue(GSE246337_beta)
+
+# gathering data genomic structures
+grset_all <- makeGenomicRatioSetFromMatrix(mat = mval, array = "IlluminaHumanMethylationEPICv2", pData = GSE246337_annot, annotation = "20a1.hg38", mergeManifest = TRUE, what = "M")
+```
+
+
+```{r}
+## Define your variable of interest and convert to a factor
+variable.of.choice <- as.factor(GSE246337_annot$age)
+```
+
+
+```{r}
+# creation of the linear model
+design <- model.matrix(~ age + Sex, data = GSE246337_annot)
+colnames(design)
+
+# creation of a contrast matrix (containing all the contrasts)
+contr.matrix <- makeContrasts(
+  AGING       = age,
+  levels = design
+)
+
+# adding the columns
+colnames(contr.matrix)
+```
+
+```{r}
+# collecting the genomic structures
+myannotation_coef <- cpg.annotate(object = grset_all, datatype = "array", cont.matrix = contr.matrix, contrasts = T, coef = "AGING", fdr = 0.05,  analysis.type="differential", design=design,  epicv2Remap = F, what = "M")
+dmrcoutput <- dmrcate(object = myannotation_coef, lambda=1000, C=2) 
+
+# results
+results.ranges <- extractRanges(dmrcoutput = dmrcoutput, genome = "hg38")
+results.ranges.df = as.data.frame(results.ranges)
+```
+
+
+```{r}
+dim(results.ranges.df)
+```
+
+```{r}
+target_genes = c("SOD2", "SCN5A", "RPA2")
+target_genes
+```
+
+
+```{r}
+# Preparazione dati con metrica consigliata
+volcano_data <- data.frame(
+  logFC = results.ranges$meandiff,
+  gene = results.ranges$overlapping.genes,
+  pval = results.ranges$min_smoothed_fdr,  
+  stringsAsFactors = FALSE
+) %>% 
+  mutate(
+    pval = ifelse(pval == 0, .Machine$double.xmin, pval), # Sostituisce pval=0 con il minimo valore rappresentabile in R
+    significance = case_when(
+      grepl("PRR34-AS1", gene) ~ "Common_Genes",  # Cerca "PRR34-AS1" in qualsiasi parte della stringa
+      gene %in% setdiff(setdiff(gene_names, common_genes), target_genes) ~ "AgeModel_Genes",
+      gene %in% common_genes ~ "Common_Genes",
+      gene %in% target_genes ~ "Target_Genes",
+      gene %in% setdiff(horvath_genes, common_genes) ~ "Horvat_Genes",
+      gene %in% setdiff(skin_genes, common_genes) ~ "Skin_Genes",
+      TRUE ~ "Not_Significant"
+    ),
+    log_pval = -log10(pval)
+  )
+
+# Soglie per evidenziare i DMR
+thresholds <- list(
+  logFC = c(-0.2, 0.2),  # Soglia di metilazione differenziale
+  pval = 0.05            # Soglia FDR
+)
+
+# Creazione del plot
+plot <- plot_ly(volcano_data, 
+        x = ~logFC, y = ~log_pval, 
+        color = ~significance,
+        colors = c("Common_Genes" = "red", 
+                  "Target_Genes" = "orange",
+                  "AgeModel_Genes" = "#4DAF4A", 
+                  "Horvat_Genes" = "#984EA3",
+                  "Skin_Genes" = "#377EB8",
+                  "Not_Significant" = "grey80"),
+        text = ~paste(gene, "<br>Δβ:", round(logFC, 3), "<br>FDR:", ifelse(pval == .Machine$double.xmin, "<1e-300", signif(pval, 3))), #~paste(gene, "<br>Δβ:", round(logFC,2), "<br>FDR:", signif(pval,3)),
+        hoverinfo = "text",
+        key = ~gene) %>%
+  add_markers(alpha = 0.6) %>%
+  layout(title = "DMR Volcano Plot")
+
+# Aggiungi annotazioni manuali per i Common_Genes e target genes
+#common_genes_data <- volcano_data %>% filter(gene %in% common_genes)
+highlight_genes = union(common_genes, target_genes)
+common_genes_data <- volcano_data %>%
+  filter(significance == "Common_Genes" |significance == "Target_Genes" | grepl("PRR34-AS1", gene)) %>%
+  mutate(
+    display_name = ifelse(grepl("PRR34-AS1", gene), "PRR34-AS1", gene)
+  )
+
+plot <- plot %>%
+  add_annotations(
+    data = common_genes_data,
+    x = ~logFC,
+    y = ~log_pval,
+    text = ~display_name,
+    font = list(color = "black", size = 12),
+    xref = "x",
+    yref = "y",
+    showarrow = TRUE,
+    arrowhead = 4,
+    arrowsize = 0.5,
+    ax = 20,
+    ay = -40
+  )
+```
+
+*Choice of metric (instead of Stouffer's):*.
+I used **`min_smoothed_fdr`** because:
+1. **Statistical robustness**: It is the most conservative FDR value among the probes in the DMR.
+2. **Clinical interpretability**: FDR is more intuitive for biomedical researchers.
+3. **Error control**: Better control of false positives than Stouffer/Fisher.
+
+*Comparison of available metrics:*
+| Metrics | Advantages | Limitations |
+|------------------|----------------------------------------|----------------------------------------|
+| `min_smoothed_fdr` | Strict FDR control | Can be too conservative |
+| `Stouffer` | Combine p-values | Sensitive to correlations between probes |
+| `Fisher` | Sensitive to small deviations | Too many false positives |
+| `maxdiff` | Highlights large effects | Ignores consistency in probes |
+| `meandiff` | Good balance | Loses localized signals |
+
+
+```{r}
+common_genes_data
+```
+
+
+```{r}
+plot
+```
+
+
+```{r}
+plot(x = results.ranges$meandiff, y = -10*log10(results.ranges$min_smoothed_fdr))
+```
+
+```{r}
+as.data.frame(results.ranges[grep(pattern = "RPA2", x = results.ranges$overlapping.genes),])
+```
+

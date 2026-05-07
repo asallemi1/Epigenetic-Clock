@@ -1,0 +1,300 @@
+---
+title: "idat_retrieval"
+author: "Alisia Sallemi"
+date: "2025-04-16"
+output: html_document
+---
+
+### Libraries
+```{r}
+set.seed(123)
+if (!require("GEOquery", quietly = TRUE))
+    BiocManager::install("GEOquery")
+if (!require("minfi", quietly = TRUE))
+    BiocManager::install("minfi")
+if (!require("R.utils", quietly = TRUE))
+    install.packages("R.utils")
+
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(R.utils)
+
+library(GEOquery)
+library(minfi)
+library(sesame) 
+library(ExperimentHub)
+library(sesameData)
+
+library(DMRcate)
+library(GenomicRanges)
+```
+
+## Load Data
+```{r}
+# Directory
+idat_dir <- "/home/alisias/data"  
+knitr::opts_knit$set(root.dir = idat_dir)
+
+# Crea la cartella per i dati GSE se non esiste
+if (!dir.exists(file.path(idat_dir, gse_id))) {
+  dir.create(file.path(idat_dir, gse_id))
+}
+```
+
+
+# Load data from NCBI: GSE246337
+```{r}
+# load idat from NCBI
+# Inserisci il tuo accession ID, es. GSE246337
+gse_id <- "GSE246337"
+
+# Prova a scaricare i file supplementari con un timeout più lungo
+tryCatch({
+  # Imposta un timeout più lungo (in secondi)
+  options(timeout = 3600)  # 1 ora
+  getGEOSuppFiles(gse_id, baseDir = idat_dir)
+}, error = function(e) {
+  message("Errore nel download: ", e$message)
+  # Potresti provare a scaricare manualmente da:
+  message("Prova a scaricare manualmente da: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=", gse_id)
+})
+```
+
+```{r}
+# Percorso del file .tar 
+tar_file <- "/home/alisias/data/GSE246337/GSE246337_RAW.tar"
+
+# Directory di destinazione 
+output_dir <- "/home/alisias/data/GSE246337"
+
+# Estrai i file .idat dall'archivio
+untar(tar_file, exdir = output_dir)  
+```
+
+
+```{r}
+# i file che vengno estratti sono in formato .idat.gz
+# vengono decompressi per ottenere i file .idat
+
+gse_dir <- "/home/alisias/data/GSE246337"
+gz_files <- list.files(gse_dir, pattern = "\\.idat\\.gz$", full.names = TRUE, ignore.case = TRUE)
+
+# Decomprimi ogni file
+lapply(gz_files, function(gz_file) {
+  # Genera il nome del file decompresso (.idat)
+  idat_file <- sub("\\.gz$", "", gz_file)
+  
+  R.utils::gunzip(gz_file, destname = idat_file, overwrite = TRUE, remove = TRUE)
+})
+```
+
+
+```{r}
+# controllo dimensionalità
+# i file idat sono il doppio dei samples: 1000
+idat_files <- list.files(gse_dir, pattern = "\\.idat$", ignore.case = TRUE, full.names = TRUE)
+cat("Numero di file .idat:", length(idat_files), "\n")
+```
+
+
+```{r}
+# load metadata from NCBI
+gset <- getGEO(gse_id, GSEMatrix = TRUE)
+
+# metadata
+metadata <- pData(gset[[1]])
+```
+
+```{r}
+# Funzione per estrarre nome e valore
+extract_key_value <- function(x) {
+  parts <- str_split_fixed(x, ":", 2)
+  key <- str_trim(parts[,1])
+  value <- str_trim(parts[,2])
+  return(tibble(key = key, value = value))
+}
+```
+
+```{r}
+# Applichiamo la funzione riga per riga
+metadata_parsed <- metadata %>%
+  rowwise() %>%
+  mutate(
+    meta = list(
+      map(c_across(starts_with("characteristics_ch1")),
+          extract_key_value) %>% bind_rows()
+    )
+  ) %>%
+  unnest(meta) %>%
+  pivot_wider(names_from = key, values_from = value) %>%
+  ungroup() %>%
+  mutate(
+    sample_id = paste0(geo_accession, "_", description),
+    geo = geo_accession
+  ) %>%
+  select(sample_id, geo, everything(), -starts_with("characteristics_ch1"))
+```
+
+
+```{r}
+ # Specifica le colonne da mantenere
+columns_to_keep <- c("geo", "subject id", "tissue", "Sex", 
+                     "race1", "race2", "ethnicity", "age")
+
+# Droppa tutte le altre colonne
+filtered_metadata <- metadata_parsed %>%
+  select(all_of(columns_to_keep))
+
+str(filtered_metadata)
+```
+
+```{r}
+library(stringr)
+
+# Pulisce e converte la colonna age in numerico (float)
+filtered_metadata <- filtered_metadata %>%
+  mutate(
+    age = as.numeric(str_extract(age, "\\d+\\.?\\d*"))  # estrae solo numeri, anche con punto decimale
+  )
+
+# Visualizza per verifica
+print(filtered_metadata$age)
+```
+
+
+```{r}
+summary(filtered_metadata$age)
+```
+
+```{r}
+saveRDS(filtered_metadata, "GSE246337_annotation.Rds")
+```
+
+# Load data from NCBI: GSE280465
+```{r}
+# load idat from NCBI
+# Inserisci il tuo accession ID, es. GSE280465
+gse_id <- "GSE280465"
+
+# Prova a scaricare i file supplementari con un timeout più lungo
+tryCatch({
+  # Imposta un timeout più lungo (in secondi)
+  options(timeout = 3600)  # 1 ora
+  getGEOSuppFiles(gse_id, baseDir = idat_dir)
+}, error = function(e) {
+  message("Errore nel download: ", e$message)
+  # Potresti provare a scaricare manualmente da:
+  message("Prova a scaricare manualmente da: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=", gse_id)
+})
+```
+
+```{r}
+# Percorso del file .tar 
+tar_file <- "/home/alisias/data/GSE280465/GSE280465_RAW.tar"
+
+# Directory di destinazione 
+output_dir <- "/home/alisias/data/GSE280465"
+
+# Estrai i file .idat dall'archivio
+untar(tar_file, exdir = output_dir)  
+```
+
+
+```{r}
+# i file che vengno estratti sono in formato .idat.gz
+# vengono decompressi per ottenere i file .idat
+
+gse_dir <- "/home/alisias/data/GSE280465"
+gz_files <- list.files(gse_dir, pattern = "\\.idat\\.gz$", full.names = TRUE, ignore.case = TRUE)
+
+# Decomprimi ogni file
+lapply(gz_files, function(gz_file) {
+  # Genera il nome del file decompresso (.idat)
+  idat_file <- sub("\\.gz$", "", gz_file)
+  
+  R.utils::gunzip(gz_file, destname = idat_file, overwrite = TRUE, remove = TRUE)
+})
+```
+
+
+```{r}
+# controllo dimensionalità
+# i file idat sono il doppio dei samples: 163
+idat_files <- list.files(gse_dir, pattern = "\\.idat$", ignore.case = TRUE, full.names = TRUE)
+cat("Numero di file .idat:", length(idat_files), "\n")
+```
+
+
+```{r}
+# load metadata from NCBI
+gset <- getGEO(gse_id, GSEMatrix = TRUE)
+
+# metadata
+metadata <- pData(gset[[1]])
+```
+
+```{r}
+# Funzione per estrarre nome e valore
+extract_key_value <- function(x) {
+  parts <- str_split_fixed(x, ":", 2)
+  key <- str_trim(parts[,1])
+  value <- str_trim(parts[,2])
+  return(tibble(key = key, value = value))
+}
+```
+
+```{r}
+# Applichiamo la funzione riga per riga
+metadata_parsed <- metadata %>%
+  rowwise() %>%
+  mutate(
+    meta = list(
+      map(c_across(starts_with("characteristics_ch1")),
+          extract_key_value) %>% bind_rows()
+    )
+  ) %>%
+  unnest(meta) %>%
+  pivot_wider(names_from = key, values_from = value) %>%
+  ungroup() %>%
+  mutate(
+    sample_id = paste0(geo_accession, "_", description),
+    geo = geo_accession
+  ) %>%
+  select(sample_id, geo, everything(), -starts_with("characteristics_ch1"))
+```
+
+
+```{r}
+ # Specifica le colonne da mantenere
+columns_to_keep <- c("GEO", "SAMPLE.1", "GROUP", "SEX", "AGE")
+
+# Droppa tutte le altre colonne
+filtered_metadata <- metadata_parsed %>%
+  select(all_of(columns_to_keep))
+
+str(filtered_metadata)
+```
+
+```{r}
+library(stringr)
+
+# Pulisce e converte la colonna age in numerico (float)
+filtered_metadata <- filtered_metadata %>%
+  mutate(
+    age = as.numeric(str_extract(age, "\\d+\\.?\\d*"))  # estrae solo numeri, anche con punto decimale
+  )
+
+# Visualizza per verifica
+print(filtered_metadata$age)
+```
+
+
+```{r}
+summary(filtered_metadata$age)
+```
+
+```{r}
+saveRDS(filtered_metadata, "GSE280465_annotation.Rds")
+```
+

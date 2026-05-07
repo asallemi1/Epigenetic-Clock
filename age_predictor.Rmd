@@ -1,0 +1,735 @@
+---
+title: "biosciences"
+author: "Alisia Sallemi"
+date: "2025-04-16"
+output: html_document
+---
+
+### Libraries
+```{r}
+set.seed(123)
+library(sesame) 
+library(ExperimentHub)
+library(sesameData)
+
+library(DMRcate)
+library(GenomicRanges)
+
+library(meffonym)
+
+library(caret)
+library(impute)
+
+library(glmnet)
+
+library(ggplot2)
+library(lattice)
+
+library(ChAMP)
+
+library(FactoMineR)
+
+library(dplyr)
+
+library(randomForest)
+library(xgboost)
+library(nnet)
+```
+
+
+# Load Data
+```{r}
+# # data
+idat_dir <- "/home/alisias/data/GSE246337/"
+setwd(idat_dir)
+# 
+# # metadata
+samples_annot = readRDS("GSE246337_annotation.Rds")
+```
+
+# Sample normalization: sesame
+```{r}
+# # normalizzazione di sesame
+# samples.beta <- openSesame(idat_dir, prep="CDB", func=getBetas)
+# saveRDS(samples.beta, "GSE246337_beta_values.Rds")
+# 
+# # beta collassati
+# samples.beta.collapsed = sesame::betasCollapseToPfx(samples.beta)
+```
+
+
+```{r}
+# saveRDS(samples.beta.collapsed, "GSE246337_beta_collapsed.Rds")
+samples.beta.collapsed = readRDS("GSE246337_beta_collapsed.Rds")
+```
+
+
+```{r}
+# Dimensionality check
+cat("Metadata shape:")
+dim(samples_annot)
+
+cat("Data shape:")
+dim(samples.beta.collapsed)
+```
+
+
+
+```{r}
+as.data.frame(samples_annot[1:5, ])
+```
+
+
+
+```{r}
+as.data.frame(samples.beta.collapsed[1:5, 1:5])
+```
+
+in samples annotation mancano i nomi delle righe, che corrispondono alle colonne di samples.beta.collapsed. vengono aggiunti
+```{r}
+samples_annot <- as.data.frame(samples_annot)
+col_names <- colnames(samples.beta.collapsed)
+sample_ids <- sub("_.*", "", col_names) # estrazione codice geo
+
+# Verifica che tutti i sample_ids siano presenti nel campo geo di samples_annotation
+if(all(sample_ids %in% samples_annot$geo)) {
+  # Crea un vettore di indici per il match
+  match_idx <- match(sample_ids, samples_annot$geo)
+  
+  # Filtra samples_annotation mantenendo solo le righe corrispondenti
+  samples_annot <- samples_annot[match_idx, ]
+  
+  # Imposta i nomi delle righe
+  rownames(samples_annot) <- col_names
+}
+```
+
+
+```{r}
+samples_annot[1:5,]
+```
+
+
+# Dataset exploration
+```{r}
+# showing the distribution of different metadata
+## age
+cat("Age distribution: \n")
+summary(samples_annot$age)
+cat("\n")
+
+## sex
+cat("Sex distribution: \n")
+table(samples_annot$Sex)
+cat("\n")
+
+## race1
+cat("Race1 distribution: \n")
+table(samples_annot$race1)
+cat("\n")
+
+## race2
+cat("Race2 distribution:\n")
+table(samples_annot$race2)
+cat("\n")
+
+## enthnicity
+cat("Ethnicity distribution:\n")
+table(samples_annot$ethnicity)
+```
+
+
+# Dataset division: train-val 
+## Metadata
+```{r}
+# dividing 80% training and 20% validation
+# età media e deviazione standard devono essere simili in train e val
+# divisione del sesso più o meno simile
+# le altre info non sono bilanciate per questo motivo la partizione sarà scelta randomicamente
+set.seed(123)
+
+age_bins <- cut(samples_annot$age, 
+                breaks = quantile(samples_annot$age, probs = seq(0, 1, 0.2)), 
+                include.lowest = TRUE)
+
+strat_var <- interaction(samples_annot$Sex, age_bins)
+
+trainIndex <- createDataPartition(strat_var, p = 0.8, list = FALSE)  
+train <- samples_annot[trainIndex, ]  
+val <- samples_annot[-trainIndex, ]  
+
+# Funzione per verificare le statistiche
+summary_stats <- function(dataset, name) {
+  cat("\n", name, "set:\n")
+  cat("N osservazioni:", nrow(dataset), "\n")
+  cat("Media età:", mean(dataset$age), "\n")
+  cat("Deviazione standard età:", sd(dataset$age), "\n")
+  cat("Distribuzione sesso:\n")
+  print(prop.table(table(dataset$Sex)))
+}
+
+# Verifica dei risultati
+summary_stats(train, "Training")
+summary_stats(val, "Validation")
+```
+
+
+```{r}
+summary(train$age)
+summary(val$age)
+```
+
+
+```{r}
+table(train$Sex)
+table(val$Sex)
+```
+
+
+```{r}
+# # exporting train and val in rds
+# saveRDS(train, file = "train.rds")
+# saveRDS(val, file = "val.rds")
+```
+
+```{r}
+# importing datasets
+ train = readRDS("train.rds")
+ val = readRDS("val.rds")
+```
+
+
+## Beta Collapsed
+```{r}
+# divisione dei beta values samples come indicato nei metadata
+train.beta.collapsed = samples.beta.collapsed[,rownames(train)]
+val.beta.collapsed = samples.beta.collapsed[,rownames(val)]
+```
+
+```{r}
+# Dimensionality check
+cat("Train shape:")
+dim(train.beta.collapsed)
+
+cat("Val shape:")
+dim(val.beta.collapsed)
+```
+
+
+```{r}
+# # exporting the beta values in rds
+# saveRDS(train.beta.collapsed, file = "train_beta.rds")
+# saveRDS(val.beta.collapsed, file = "val_beta.rds")
+```
+
+
+```{r}
+# importing the beta values
+train.beta.collapsed = readRDS("train_beta.rds")
+val.beta.collapsed = readRDS("val_beta.rds")
+```
+
+
+# NA imputation
+```{r}
+# verifica esistenza NA
+cat("NA nel training:", sum(is.na(train.beta.collapsed)), "\n")
+cat("NA nel validation:", sum(is.na(val.beta.collapsed)), "\n")
+```
+
+```{r}
+# Verifica presenza di probes con NA
+na_counts <- rowSums(is.na(train.beta.collapsed))
+rows_na <- which(na_counts > 0)
+rows <- data.frame(Row_Index = rows_na, NA_Counts = na_counts[rows_na])
+rows
+```
+
+```{r}
+# knn imputation of NA
+# impute.knn vuole features sulle righe
+knn_input <- as.matrix(train.beta.collapsed)
+
+# Esegui KNN imputation (k=5)
+set.seed(123)
+beta_imputed <- impute.knn(knn_input, k = 5, rowmax = 0.5, colmax = 0.5)
+
+# Ri-trasponi
+train_imputed <- t(beta_imputed$data)
+
+cat("Valori mancanti prima:", sum(is.na(train.beta.collapsed)), "\n")
+cat("Valori mancanti dopo:", sum(is.na(train_imputed)), "\n")
+```
+
+
+```{r}
+# Dimensionality check
+cat("Train shape:")
+dim(train.beta.collapsed)
+
+cat("Val shape:")
+dim(val.beta.collapsed)
+```
+nessuna riga/colonna è stata rimossa == nessuna riga/colonna aveva più del 50% dei valori come NA
+
+# Model training - glmnet (feature selection)
+```{r}
+# use 10 fold cross validation to estimate the lambda parameter  
+# in the training data 
+glmnet.Training.CV = cv.glmnet(train_imputed, trafo(train$age), nfolds=20, alpha=0.5, family="gaussian") 
+```
+
+```{r}
+# The definition of the lambda parameter: 
+lambda.glmnet.Training = glmnet.Training.CV$lambda.min 
+```
+
+```{r}
+# Fit the elastic net predictor to the training data 
+glmnet.Training = glmnet(train_imputed, trafo(train$age), family="gaussian", alpha=0.5, nlambda=100) 
+```
+
+```{r}
+# Arrive at an estimate of DNAmAge 
+DNAmAgeBasedOnTraining= anti.trafo(predict(glmnet.Training, t(val.beta.collapsed), type="response", s=lambda.glmnet.Training))
+```
+
+## Results on train
+```{r}
+min(glmnet.Training.CV$cvm)
+```
+
+## Results on val
+```{r}
+val$glmnet = DNAmAgeBasedOnTraining  
+cor_test = cor.test(x = val$age, val$glmnet)
+print(cor_test)
+plot(x = val$age, val$glmnet, main = "Predicted vs. Actual Age", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(val$glmnet ~ val$age)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+```
+
+
+## Elastic-net Coefficients
+```{r}
+coefficients_df <- as.data.frame(as.matrix(coef(glmnet.Training, s = lambda.glmnet.Training)))
+colnames(coefficients_df) <- "coefficients"
+
+# Filtra solo i coefficienti diversi da zero
+nonzero_coeff <- coefficients_df[coefficients_df$coefficients != 0, , drop = FALSE]
+nonzero_coeff <- nonzero_coeff[-1, , drop = FALSE]  # Rimuove l'intercetta
+
+# Estrai i nomi delle probe 
+probes_coeff <- rownames(nonzero_coeff)
+
+# verifying if there are imputed NA within the coefficients
+intersect(rownames(rows), probes_coeff)
+```
+
+
+```{r}
+# numero di probe selezionate
+length(probes_coeff)
+```
+
+```{r}
+nonzero_coeff_sorted <- nonzero_coeff[order(nonzero_coeff$coefficients, decreasing = TRUE), , drop = FALSE]
+nonzero_coeff_sorted
+```
+
+
+```{r}
+probes_coeff
+```
+
+## Geometric Analysis of the regression line and the bisector
+```{r}
+# Coefficienti della retta di regressione (y = a + b*x)
+b_reg <- coef(reg_line)[2]
+a_reg <- coef(reg_line)[1]
+
+# Coefficienti della bisettrice (y = 0 + 1*x)
+b_bis <- 1
+a_bis <- 0
+
+# Calcolo angolo tra le rette (in gradi)
+if(abs(b_reg - b_bis) > 1e-10) {  # Se non sono parallele
+  angle_rad <- atan(abs((b_reg - b_bis)/(1 + b_reg*b_bis)))
+  angle_deg <- angle_rad * (180/pi)
+  cat("L'angolo tra la bisettrice e la retta di regressione è:", round(angle_deg, 2), "gradi\n")
+} else {  # Se sono parallele
+  distance <- abs(a_reg - a_bis)/sqrt(1 + b_reg^2)
+  cat("Le rette sono parallele. La distanza tra loro è:", round(distance, 4), "\n")
+}
+```
+
+## Systematic Correction of the predictions 
+```{r}
+# Usa un modello con regressione polinomiale per calibrare le predizioni
+poly_model <- lm(age ~ poly(glmnet, degree = 2.6 , raw = TRUE), data = val)
+val$glmnet_calibrated <- predict(poly_model, newdata=val)
+```
+
+
+```{r}
+cor_test = cor.test(x = val$age, val$glmnet_calibrated)
+print(cor_test)
+plot(x = val$age, val$glmnet_calibrated, main = "Predicted vs. Actual Age", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(val$glmnet_calibrated ~ val$age)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+```
+
+
+```{r}
+# Coefficienti della retta di regressione (y = a + b*x)
+b_reg <- coef(reg_line)[2]
+a_reg <- coef(reg_line)[1]
+
+# Coefficienti della bisettrice (y = 0 + 1*x)
+b_bis <- 1
+a_bis <- 0
+
+# Calcolo angolo tra le rette (in gradi)
+if(abs(b_reg - b_bis) > 1e-10) {  # Se non sono parallele
+  angle_rad <- atan(abs((b_reg - b_bis)/(1 + b_reg*b_bis)))
+  angle_deg <- angle_rad * (180/pi)
+  cat("L'angolo tra la bisettrice e la retta di regressione è:", round(angle_deg, 2), "gradi\n")
+} else {  # Se sono parallele
+  distance <- abs(a_reg - a_bis)/sqrt(1 + b_reg^2)
+  cat("Le rette sono parallele. La distanza tra loro è:", round(distance, 4), "\n")
+}
+```
+
+
+# Horvath models Comparison on val
+```{r}
+preds_HRV = meffonym.score(x = val.beta.collapsed, calibrate = T, model = "horvath") # Warning: Dataset missing 13 score input variables for model horvath
+preds_SKIN = meffonym.score(x = val.beta.collapsed, calibrate = T, model = "skin") # Warning: Dataset missing 17 score input variables for model skin
+```
+
+## Results
+```{r}
+val$HRV = preds_HRV$score 
+cor_test1 = cor.test(x = val$age, val$HRV)
+print(cor_test1)
+plot(x = val$age, val$HRV, main = "Predicted vs. Actual Age - Horvath", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(val$HRV ~ val$age)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test1$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+
+
+val$SKIN = preds_SKIN$score
+cor_test2 = cor.test(x = val$age, val$SKIN)
+print(cor_test2)
+plot(x = val$age, val$SKIN, main = "Predicted vs. Actual Age - Skin and Blood", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(val$SKIN ~ val$age)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test2$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+```
+
+
+# Performances Comparison on val
+```{r}
+# Calcolo delle metriche principali
+metrics <- function(actual, predicted) {
+  list(
+    RMSE = sqrt(mean((actual - predicted)^2)),
+    MAE = mean(abs(actual - predicted)),
+    COR = cor(actual, predicted, method = "pearson")
+  )
+}
+
+```
+
+
+```{r}
+metrics_table <- data.frame(
+  Base = unlist(metrics(val$age, val$glmnet)),
+  Calibrato = unlist(metrics(val$age, val$glmnet_calibrated)),
+  HRV = unlist(metrics(val$age, val$HRV)),
+  SKIN = unlist(metrics(val$age, val$SKIN))
+)
+```
+
+```{r}
+metrics_table
+```
+
+```{r}
+age_groups <- cut(val$age, 
+                  breaks = c(0, 30, 50, 70, 100), 
+                  labels = c("0-30", "31-50", "51-70", "71-100"))
+
+models_to_evaluate <- c("glmnet", "glmnet_calibrated", "HRV", "SKIN")
+
+calculate_group_metrics <- function(data, age_group_var, models) {
+  data$Group <- age_group_var  # Aggiungiamo la variabile al dataframe
+  
+  results <- lapply(models, function(model) {
+    metrics_by_group <- by(data, data$Group, function(df) {
+      m <- metrics(df$age, df[[model]])
+      data.frame(
+        Group = unique(df$Group),
+        Model = model,
+        RMSE = m$RMSE,
+        MAE = m$MAE,
+        stringsAsFactors = FALSE
+      )
+    })
+    do.call(rbind, metrics_by_group)
+  })
+  
+  final_results <- do.call(rbind, results)
+  rownames(final_results) <- NULL
+  return(final_results)
+}
+```
+
+
+```{r}
+# Calcolo delle metriche per fasce d'età
+age_group_metrics <- calculate_group_metrics(
+  data = val,
+  age_group_var = age_groups,
+  models = models_to_evaluate
+)
+```
+
+```{r}
+age_group_metrics
+```
+
+```{r}
+# savig serults
+#saveRDS(val, "results.rds")
+#saveRDS(probes_coeff, "selected_probes.rds")
+```
+
+# Model Testing
+## Load Data
+```{r}
+# # data
+# idat_dir <- "/home/alisias/data/GSE280465/"
+# setwd(idat_dir)
+# 
+# # metadata
+# test_annot = read.table("./gse280465_annot.txt", sep = "\t", header = T, row.names = 1)
+# 
+# # Selezione dei soli samples di sangue
+# test_annot = test_annot[which(test_annot$GROUP == "PBMC"),] 
+```
+
+## Sample normalization: sesame
+```{r}
+# # normalizzazione di sesame
+# test.beta <- openSesame(idat_dir, prep="CDB", func=getBetas)
+# test.beta.blood = test.beta[,rownames(test_annot)]
+# 
+# # beta collassati
+# test.beta.collapsed = sesame::betasCollapseToPfx(test.beta.blood)
+```
+
+
+```{r}
+#saveRDS(test_annot, "test.rds")
+#saveRDS(test.beta.collapsed, "test_beta.rds")
+test = readRDS("test.rds")
+test.beta.collapsed = readRDS("test_beta.rds")
+```
+
+
+```{r}
+# Dimensionality check
+cat("Metadata shape:")
+dim(test)
+
+cat("Data shape:")
+dim(test.beta.collapsed)
+```
+
+
+## NA imputation
+```{r}
+# knn imputation of NA
+# impute.knn vuole features sulle righe
+knn_input <- as.matrix(test.beta.collapsed)
+
+# Esegui KNN imputation (k=5)
+set.seed(123)
+beta_imputed <- impute.knn(knn_input, k = 5, rowmax = 0.5, colmax = 0.5)
+
+# Ri-trasponi
+test_imputed <- t(beta_imputed$data)
+
+cat("Valori mancanti prima:", sum(is.na(test.beta.collapsed)), "\n")
+cat("Valori mancanti dopo:", sum(is.na(test_imputed)), "\n")
+```
+
+
+## Test predictions
+```{r}
+# Arrive at an estimate of DNAmAge 
+test_pred = anti.trafo(predict(glmnet.Training, test_imputed, type="response", s=lambda.glmnet.Training))
+```
+
+
+```{r}
+test$glmnet = test_pred 
+cor.test(x = test$AGE, test$glmnet)
+```
+
+
+## Systematic Correction of the predictions 
+```{r}
+# Usa un modello con regressione polinomiale per calibrare le predizioni
+test$glmnet_calibrated <- predict(poly_model, newdata=test)
+```
+
+## Results on test
+```{r}
+cor_test = cor.test(x = test$AGE, test$glmnet_calibrated)
+print(cor_test)
+plot(x = test$AGE, test$glmnet_calibrated, main = "Predicted vs. Actual Age", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(test$glmnet_calibrated ~ test$AGE)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+```
+
+
+## Horvath models Comparison on test
+```{r}
+preds_HRV = meffonym.score(x = test.beta.collapsed, calibrate = T, model = "horvath") # Warning: Dataset missing 13 score input variables for model horvath
+preds_SKIN = meffonym.score(x = test.beta.collapsed, calibrate = T, model = "skin") # Warning: Dataset missing 17 score input variables for model skin
+```
+
+
+```{r}
+test$HRV = preds_HRV$score 
+cor_test1 = cor.test(x = test$AGE, test$HRV)
+print(cor_test1)
+plot(x = test$AGE, test$HRV, main = "Predicted vs. Actual Age - Horvath", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(test$HRV ~ test$AGE)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test1$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+
+
+test$SKIN = preds_SKIN$score
+cor_test2 = cor.test(x = test$AGE, test$SKIN)
+print(cor_test2)
+plot(x = test$AGE, test$SKIN, main = "Predicted vs. Actual Age - Skin and Blood", 
+     xlab = "Actual Age", ylab = "Predicted Age")
+reg_line = lm(test$SKIN ~ test$AGE)
+abline(reg_line, col = "red", lwd = 1)
+abline(a = 0, b = 1, col = "blue", lwd = 1, lty = 2)
+legend("topleft", 
+       legend = c(paste("Regression (R =", round(cor_test2$estimate, 3), ")"),
+                          "Bisector (y = x)"),
+       col = c("red", "blue"), lty = c(1, 2), lwd = 1)
+```
+
+
+## Performances Comparison on test
+```{r}
+metrics_table_test <- data.frame(
+  Base = unlist(metrics(test$AGE, test$glmnet)),
+  Calibrato = unlist(metrics(test$AGE, test$glmnet_calibrated)),
+  HRV = unlist(metrics(test$AGE, test$HRV)),
+  SKIN = unlist(metrics(test$AGE, test$SKIN))
+)
+```
+
+```{r}
+metrics_table_test
+```
+
+
+```{r}
+age_groups <- cut(test$AGE, 
+                  breaks = c(0, 30, 50, 70, 100), 
+                  labels = c("0-30", "31-50", "51-70", "71-100"))
+models_to_evaluate <- c("glmnet", "glmnet_calibrated", "HRV", "SKIN")
+
+calculate_group_metrics <- function(data, age_group_var, models) {
+  data$Group <- age_group_var  # Aggiungiamo la variabile al dataframe
+  
+  results <- lapply(models, function(model) {
+    metrics_by_group <- by(data, data$Group, function(df) {
+      m <- metrics(df$AGE, df[[model]])
+      data.frame(
+        Group = unique(df$Group),
+        Model = model,
+        RMSE = m$RMSE,
+        MAE = m$MAE,
+        stringsAsFactors = FALSE
+      )
+    })
+    do.call(rbind, metrics_by_group)
+  })
+  
+  final_results <- do.call(rbind, results)
+  rownames(final_results) <- NULL
+  return(final_results)
+}
+
+# Calcolo delle metriche per fasce d'età
+age_group_metrics_test <- calculate_group_metrics(
+  data = test,
+  age_group_var = age_groups,
+  models = models_to_evaluate
+)
+```
+
+```{r}
+age_group_metrics_test
+```
+
+
+```{r}
+# savig serults
+#saveRDS(test, "results_test.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
